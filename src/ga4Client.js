@@ -1,7 +1,9 @@
 import { BetaAnalyticsDataClient } from "@google-analytics/data";
-import fs from "fs";
+import dotenv from "dotenv";
+dotenv.config();
 
-const key = JSON.parse(fs.readFileSync("./service-account.json", "utf8"));
+const key = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+key.private_key = key.private_key.replace(/\\n/g, "\n");
 
 const analyticsDataClient = new BetaAnalyticsDataClient({
   credentials: key
