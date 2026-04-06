@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 import express from "express";
 import cors from "cors";
+import { OAuth2Client } from "google-auth-library";
 import { getMonthlyGA4Metrics,fetchGA4Data,fetchGA4Dynamic } from "./ga4Client.js";
 import { generateReport } from "./reportGenerator.js";
 import { classifyQuestion } from "./classifier.js";
@@ -9,6 +10,12 @@ import { callLLM } from "./ai.js";
 import { getInstagramOverview } from "./instagram.js";
 import { captureInstagramFollowerSnapshot, getInstagramFollowerGrowth } from "./instagramFollowerJob.js";
 import { getGoogleAdsOverview } from "./googleAds.js";
+import { getFacebookOverview } from "./facebook.js";
+import { saveUserTokens } from "./searchConsoleTokenStore.js";
+import { getUserTokens } from "./searchConsoleTokenStore.js";
+import { getSearchConsoleAuthUrl, exchangeCodeForTokens, } from "./searchConsoleClient.js";
+import { listSearchConsoleSites, getSearchConsoleOverview, getSearchConsoleTopQueries, getTopPages, 
+getDevicePerformance, getCountryPerformance, getQueryPagePerformance, getSearchConsoleCompare, getLowCtrOpportunities } from "./searchConsole.js";
 
 const app = express();
 app.use(cors());
@@ -196,6 +203,47 @@ app.post("/api/instagram/followers/snapshot", async (req, res) => {
   }
 });
 
+app.get("/api/google-ads/connect", (req, res) => {
+  const oauth2Client = new OAuth2Client(
+    process.env.GOOGLE_ADS_CLIENT_ID,
+    process.env.GOOGLE_ADS_CLIENT_SECRET,
+    process.env.GOOGLE_ADS_REDIRECT_URI
+  );
+
+  const url = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: ["https://www.googleapis.com/auth/adwords"],
+  });
+
+  res.json({ url });
+});
+
+app.get("/api/google-ads/oauth/callback", async (req, res) => {
+  try {
+    const { code } = req.query;
+
+    if (!code) {
+      return res.status(400).send("Missing code");
+    }
+
+    const oauth2Client = new OAuth2Client(
+      process.env.GOOGLE_ADS_CLIENT_ID,
+      process.env.GOOGLE_ADS_CLIENT_SECRET,
+      process.env.GOOGLE_ADS_REDIRECT_URI
+    );
+
+    const { tokens } = await oauth2Client.getToken(code);
+
+    console.log("🔥 NEW REFRESH TOKEN:", tokens.refresh_token);
+
+    res.send("Google Ads connected. Check server console for refresh token.");
+  } catch (error) {
+    console.error("Google Ads OAuth error:", error);
+    res.status(500).send("OAuth failed");
+  }
+});
+
 app.get("/api/google-ads/overview", async (req, res) => {
   try {
     const today = new Date();
@@ -220,7 +268,414 @@ app.get("/api/google-ads/overview", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 5000;
+app.get("/api/facebook/overview", async (req, res) => {
+  try {
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getFacebookOverview({ startDate, endDate });
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({
+      error: true,
+      message: error.message,
+      details: error?.response?.data || null,
+    });
+  }
+});
+
+app.get("/api/search-console/connect", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const url = getSearchConsoleAuthUrl(userId);
+    res.json({ url });
+  } catch (error) {
+    console.error("Search Console connect error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to generate Search Console auth URL",
+    });
+  }
+});
+
+app.get("/api/search-console/oauth/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    if (!code) {
+      return res.status(400).json({
+        error: true,
+        message: "Missing OAuth code",
+      });
+    }
+
+    const userId = state || "default";
+    const tokens = await exchangeCodeForTokens(code);
+    await saveUserTokens(userId, tokens);
+
+    res.send("Google Search Console connected successfully.");
+  } catch (error) {
+    console.error("Search Console callback error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to complete Search Console OAuth callback",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/sites", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const data = await listSearchConsoleSites(tokens, userId);
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console sites error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch Search Console sites",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/overview", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getSearchConsoleOverview({
+      tokens: tokens,
+      userId: userId,
+      startDate,
+      endDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console overview error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch Search Console overview",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/top-queries", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getSearchConsoleTopQueries({
+      tokens: tokens,
+      userId:userId,
+      startDate,
+      endDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console top queries error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch Search Console top queries",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/top-pages", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getTopPages({
+      tokens: tokens,
+      userId:userId,
+      startDate,
+      endDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console top pages error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch Search Console top pages",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/devices", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getDevicePerformance({
+      tokens: tokens,
+      userId:userId,
+      startDate,
+      endDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console device performance error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch Search Console device performance",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/countries", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getCountryPerformance({
+      tokens: tokens,
+      userId:userId,
+      startDate,
+      endDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console countries performance error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch Search Console countries performance",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/query-pages", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+
+    const data = await getQueryPagePerformance({
+      tokens,
+      userId,
+      startDate,
+      endDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console query-pages error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch query page performance",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/compare", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const {
+      currentStartDate,
+      currentEndDate,
+      previousStartDate,
+      previousEndDate,
+    } = req.query;
+
+    const data = await getSearchConsoleCompare({
+      tokens,
+      userId,
+      currentStartDate,
+      currentEndDate,
+      previousStartDate,
+      previousEndDate,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console compare error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch compare data",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+app.get("/api/search-console/low-ctr", async (req, res) => {
+  try {
+    const userId = req.query.userId || "default";
+    const tokens = getUserTokens(userId);
+
+    if (!tokens) {
+      return res.status(401).json({
+        error: true,
+        message: "Search Console not connected yet",
+      });
+    }
+
+    const today = new Date();
+    const defaultEnd = today.toISOString().slice(0, 10);
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    const defaultStart = start.toISOString().slice(0, 10);
+
+    const startDate = req.query.startDate || defaultStart;
+    const endDate = req.query.endDate || defaultEnd;
+    const minImpressions = req.query.minImpressions || 100;
+    const maxCtr = req.query.maxCtr || 0.02;
+
+    const data = await getLowCtrOpportunities({
+      tokens,
+      userId,
+      startDate,
+      endDate,
+      minImpressions,
+      maxCtr,
+    });
+
+    res.json(data);
+  } catch (error) {
+    console.error("Search Console low-ctr error:", error);
+    res.status(500).json({
+      error: true,
+      message: "Failed to fetch low CTR opportunities",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
