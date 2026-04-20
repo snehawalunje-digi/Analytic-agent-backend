@@ -34,6 +34,26 @@ const ALLOWED_INTENTS = new Set([
   "top_performers", "page_lookup", "why_change", "follow_up"
 ]);
 
+function detectPageRef(question) {
+  const q = question.toLowerCase();
+
+  // Explicit path like /home, /about-us, /gdpr
+  const pathMatch = q.match(/\/[a-z0-9][a-z0-9\-_\/]*/);
+  if (pathMatch) return pathMatch[0];
+
+  // "home page", "homepage", "home" when near page/views/visits
+  if (/\b(home\s*page|homepage|home)\b/.test(q) && /\b(page|view|visit|traffic|hit)/.test(q)) {
+    return "home";
+  }
+
+  // "X page" where X is a noun phrase (1-3 words)
+  const phraseMatch = q.match(/\b((?:about\s*us|about|pricing|contact|blog|services?|products?|gdpr|privacy|terms|faq|login|signup|checkout|cart|support|careers?|team)(?:\s+[a-z]+)?)\s+page\b/);
+  if (phraseMatch) return phraseMatch[1].trim().replace(/\s+/g, "-");
+
+  // "for /slug" or "on /slug" already handled by path match above
+  return null;
+}
+
 function buildHistoryBlock(history) {
   if (!history?.length) return "No prior turns.";
   return history
@@ -72,7 +92,7 @@ Current user question: "${question}"
 Rules:
 - Resolve follow-ups ("why did it drop?", "compare with previous", "what about mobile?") using last context.
 - For "why did it drop/change" questions, set intent="why_change", needsBreakdown=true, breakdownDims=["sessionDefaultChannelGroup","deviceCategory","country","pagePath"].
-- For page-specific questions ("/home", "/gdpr"), set pagePath and include "pagePath" in dimensions.
+- For page-specific questions, set pagePath and include "pagePath" in dimensions. Accept BOTH explicit paths ("/home", "/gdpr", "/about-us") AND natural phrases ("home page" → "home", "about us page" → "about-us", "pricing page" → "pricing", "contact page" → "contact", "blog" → "blog"). Strip the word "page" and use a keyword or path — the backend will do a case-insensitive CONTAINS match. If the user clearly names a specific page, ALWAYS set pagePath.
 - For comparisons, include TWO dateRanges.
 - Leave dateRanges as [] if none mentioned — it will be filled by defaults.
 - Prefer "sessions", "activeUsers", "screenPageViews", "bounceRate", "conversions" as metrics.
@@ -100,6 +120,21 @@ Output shape:
   }
 
   const plan = validatePlan(parsed);
+
+  // Deterministic page detection fallback — catch what the LLM missed
+  if (!plan.pagePath) {
+    const detected = detectPageRef(question);
+    if (detected) plan.pagePath = detected;
+  }
+  if (plan.pagePath) {
+    if (!plan.dimensions.includes("pagePath")) plan.dimensions.push("pagePath");
+    // Default page questions to page views unless user asked for something else
+    const wantsViews = /view|visit|traffic|hits?/i.test(question) ||
+      !plan.metrics.some(m => m === "sessions" || m === "activeUsers" || m === "conversions" || m === "bounceRate");
+    if (wantsViews && !plan.metrics.includes("screenPageViews")) {
+      plan.metrics = ["screenPageViews", ...plan.metrics.filter(m => m !== "screenPageViews")];
+    }
+  }
 
   // Deterministic date override — trust JS over LLM
   const resolved = resolveDateRanges(question, lastContext);

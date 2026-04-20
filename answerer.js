@@ -13,7 +13,8 @@ STRICT RULES — violating these is failure:
 3. For "why" questions, cite specific rows from the breakdowns JSON that changed most. Prefix causal statements with "Likely:" and name the exact dimension value.
 4. Format page paths readably (e.g. "/home" → "Home page") but keep the raw path in parentheses for clarity.
 5. Keep responses short: 2-5 sentences or a compact bulleted list. No filler.
-6. Do not mention that you are an AI, do not apologize, do not speculate.`;
+6. Do not mention that you are an AI, do not apologize, do not speculate.
+7. For page-specific queries, sum the metric across all matched rows (the totals field is pre-aggregated). If multiple page variants matched (e.g. "/home" and "/home/"), list them briefly so the user can verify. If zero rows matched, say "No data found for that page in the selected range" and suggest the user check the exact path.`;
 
 function truncateData(data) {
   const clone = JSON.parse(JSON.stringify(data));
