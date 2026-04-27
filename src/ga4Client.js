@@ -99,7 +99,7 @@ export async function getMonthlyGA4Metrics() {
   };
 }
 
-export async function fetchGA4Dynamic(dateRanges, metrics, dimensions) {
+export async function fetchGA4Dynamic(dateRanges, metrics, dimensions, pagePath) {
 
   // comparison case
   if (dateRanges.length > 1) {
@@ -133,6 +133,19 @@ export async function fetchGA4Dynamic(dateRanges, metrics, dimensions) {
     return results;
   }
 
+  let dimensionFilter = null;
+  if (pagePath) {
+    dimensionFilter = {
+      filter: {
+        fieldName: "pagePath",
+        stringFilter: {
+          matchType: "CONTAINS",
+          value: pagePath
+        }
+      }
+    };
+  }
+
   // normal single range case
   const [response] = await analyticsDataClient.runReport({
     property: `properties/${process.env.GA_PROPERTY_ID}`,
@@ -142,6 +155,8 @@ export async function fetchGA4Dynamic(dateRanges, metrics, dimensions) {
     metrics: metrics.map(m => ({ name: m })),
 
     dimensions: dimensions.map(d => ({ name: d })),
+
+    dimensionFilter: dimensionFilter,
 
     limit: 50,
   });

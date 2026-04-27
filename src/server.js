@@ -7,6 +7,11 @@ import { getMonthlyGA4Metrics,fetchGA4Data,fetchGA4Dynamic } from "./ga4Client.j
 import { generateReport } from "./reportGenerator.js";
 import { classifyQuestion } from "./classifier.js";
 import { callLLM } from "./ai.js";
+import { planQuestion } from "./chat/planner.js";
+import { executePlan } from "./chat/ga4Fetcher.js";
+import { answerFromData, suggestFollowUps } from "./chat/answerer.js";
+import { appendTurn, getRecentHistory, getLastContext } from "./chat/sessionStore.js";
+import { randomUUID } from "crypto";
 import { getInstagramOverview } from "./instagram.js";
 import { captureInstagramFollowerSnapshot, getInstagramFollowerGrowth } from "./instagramFollowerJob.js";
 import { getGoogleAdsOverview } from "./googleAds.js";
@@ -20,6 +25,24 @@ getDevicePerformance, getCountryPerformance, getQueryPagePerformance, getSearchC
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const pageAliases = {
+  "home page": "/",
+  "homepage": "/",
+  "landing page": "/",
+
+  "contact page": "/contact-us/",
+  "contact us": "/contact-us/",
+
+  "demand better page": "/demand-better/",
+  "demand better": "/demand-better/",
+
+  "about page": "/about/",
+  "about us": "/about/",
+
+  "abm solutions": "/abm-solutions/",
+  "abm solutions page": "/abm-solutions/"
+};
 
 app.get("/api/metrics", async (req, res) => {
   try {
@@ -87,6 +110,46 @@ app.get("/api/dashboard", async (req, res) => {
   } catch (error) {
     console.error("Dashboard API error:", error);
     res.status(500).json({ error: "Failed to load dashboard data" });
+  }
+});
+
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { question, sessionId: incomingId, startDate, endDate } = req.body || {};
+    if (!question || typeof question !== "string") {
+      return res.status(400).json({ error: "question is required" });
+    }
+    const sessionId = incomingId || randomUUID();
+    const history = getRecentHistory(sessionId, 3);
+    const lastContext = getLastContext(sessionId);
+
+    const defaultRange = {
+      startDate: startDate || "30daysAgo",
+      endDate: endDate || "today"
+    };
+
+    const plan = await planQuestion(question, history, lastContext, defaultRange);
+    const data = await executePlan(plan);
+    const answer = await answerFromData(question, plan, data, history);
+    const followUps = suggestFollowUps(plan);
+
+    appendTurn(sessionId, {
+      question,
+      answer,
+      context: {
+        intent: plan.intent,
+        metrics: plan.metrics,
+        dimensions: plan.dimensions,
+        dateRanges: plan.dateRanges,
+        pagePath: plan.pagePath
+      },
+      at: Date.now()
+    });
+
+    res.json({ sessionId, answer, data, plan, followUps });
+  } catch (err) {
+    console.error("/api/chat error:", err);
+    res.status(500).json({ error: "Chat failed", detail: err.message });
   }
 });
 
@@ -334,7 +397,6 @@ app.get("/api/search-console/sites", async (req, res) => {
   try {
     const userId = req.query.userId || "default";
     const tokens = getUserTokens(userId);
-
     if (!tokens) {
       return res.status(401).json({
         error: true,
